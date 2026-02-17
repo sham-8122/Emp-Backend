@@ -51,22 +51,128 @@ src/
     admin.middleware.js
     auth.middleware.js
     logger.middleware.js
+    upload.middleware.js
   models/
     employee.model.js
     index.js
+    salaryHistory.model.js
     user.model.js
   routes/
     auth.routes.js
     employee.routes.js
+  services/
+    mail.service.js
   validations/
     employee.validation.js
   app.js
+uploads/
+  1771242373527-Screenshot-from-2026-02-16-17-11-32.png
+  1771246887241-Screenshot-from-2026-02-16-18-31-06.png
+  1771304851561-Ein-professionelles-Bewerbungsfoto-ist-der-SchlÃ¼ssel-zu-einem-erfolgreichen-ersten-Eindruck!-ð¸-__In.jpeg
+  1771304922079-à¸à¸±à¸à¸à¸£à¸´à¸«à¸²à¸£à¸­à¸²à¸à¸µà¸.jpeg
+  1771304985937-Alexis-Petit,-french-model,-France-;.jpeg
+  1771305027547-Nashville's-Luxury-Headshot-&-Branding-Photographer-__-Corporate-Photos-_-Tausha-Dickinson-Photography.jpeg
+  1771305130241-_-(2).jpeg
+  1771305246332-Post-by-@locksxcreenxs-Â·-9-images.jpeg
+  1771305383161-ððð¡ðð-ðððððð.jpeg
+  1771305638118-Gambar-Pengusaha-Wanita-Asia-Yang-Percaya-Diri-Memegang-Tablet-_-Fotografi-PNG-Unduhan-Gratis---Pikbest.jpeg
 package.json
 server.js
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="src/middlewares/upload.middleware.js">
+const multer = require('multer');
+const fs = require('fs');
+
+// Ensure upload directory exists
+const uploadDir = 'uploads/';
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    // Clean filename: remove spaces, use timestamp
+    const cleanName = file.originalname.replace(/\s+/g, '-');
+    cb(null, Date.now() + '-' + cleanName);
+  }
+});
+
+const fileFilter = (req, file, cb) => {
+  if (file.mimetype.startsWith('image/')) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only images are allowed!'), false);
+  }
+};
+
+const upload = multer({ storage: storage, fileFilter: fileFilter });
+
+module.exports = upload;
+</file>
+
+<file path="src/models/salaryHistory.model.js">
+module.exports = (sequelize, DataTypes) => {
+  return sequelize.define('SalaryHistory', {
+    previousSalary: {
+      type: DataTypes.FLOAT,
+      allowNull: false
+    },
+    newSalary: {
+      type: DataTypes.FLOAT,
+      allowNull: false
+    },
+    incrementDate: {
+      type: DataTypes.DATE,
+      defaultValue: DataTypes.NOW
+    }
+  });
+};
+</file>
+
+<file path="src/services/mail.service.js">
+const nodemailer = require('nodemailer');
+
+// Configure the email transporter using your .env variables
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+/**
+ * Sends a pay slip email to an employee.
+ * @param {object} employee - The employee object (must have name and email).
+ * @param {string} htmlBody - The HTML content of the email.
+ */
+const sendPaySlipEmail = async (employee, htmlBody) => {
+  const mailOptions = {
+    from: `"EmployeeHub Admin" <${process.env.EMAIL_USER}>`,
+    to: employee.email,
+    subject: `Your Salary Slip for ${new Date().toLocaleString('default', { month: 'long', year: 'numeric' })}`,
+    html: htmlBody,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Pay slip email sent to ${employee.email}`);
+    return { success: true };
+  } catch (error) {
+    console.error(`Error sending email: ${error}`);
+    return { success: false, error };
+  }
+};
+
+module.exports = { sendPaySlipEmail };
+</file>
 
 <file path="src/config/db.js">
 const { Sequelize } = require('sequelize');
@@ -138,32 +244,60 @@ exports.login = async (req, res) => {
 
 <file path="src/controllers/employee.controller.js">
 const { Employee } = require("../models");
-const { fn, col, Op } = require("sequelize"); // Import Op for search operators
+const { fn, col, Op } = require("sequelize"); 
+const { SalaryHistory } = require("../models"); // Import SalaryHistory
+const { sendPaySlipEmail } = require('../services/mail.service'); // Import mail service
 
+
+const calculateBreakup = (totalSalary) => {
+  const basic = Math.round(totalSalary * 0.40);
+  const hra = Math.round(totalSalary * 0.20);
+  const da = Math.round(totalSalary * 0.10);
+  const travel = Math.round(totalSalary * 0.05);
+  const special = totalSalary - (basic + hra + da + travel);
+  return { basic, hra, da, travel, special };
+};
 /* ==============================
    GET EMPLOYEES (SEARCH + PAGINATION)
+============================== */
+/* ==============================
+   GET EMPLOYEES (NOW WITH SORT & FILTER)
 ============================== */
 exports.getEmployees = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 5;
-    const search = req.query.search || ""; // Get search term
+    const search = req.query.search || "";
+    
+    // --- 1. GET NEW PARAMS ---
+    const sort = req.query.sort || "createdAt_DESC"; // Default sort
+    const role = req.query.role || ""; // Role filter
+
     const offset = (page - 1) * limit;
 
-    // Dynamic Search Condition
-    const searchCondition = search
-      ? {
-          [Op.or]: [
-            { name: { [Op.iLike]: `%${search}%` } }, // Case-insensitive (Postgres)
-            { email: { [Op.iLike]: `%${search}%` } },
-            { role: { [Op.iLike]: `%${search}%` } },
-          ],
-        }
-      : {};
+    // --- 2. PREPARE SEQUELIZE ORDER OPTION ---
+    const [sortField, sortOrder] = sort.split('_');
+    const order = [[sortField, sortOrder]];
+
+    // --- 3. COMBINE FILTERS ---
+    let whereClause = {};
+
+    // Search condition
+    if (search) {
+      whereClause[Op.or] = [
+        { name: { [Op.iLike]: `%${search}%` } },
+        { email: { [Op.iLike]: `%${search}%` } },
+      ];
+    }
+    
+    // Role filter condition
+    if (role) {
+      whereClause.role = role;
+    }
 
     const { count, rows } = await Employee.findAndCountAll({
-      where: searchCondition,
-      order: [["createdAt", "DESC"]],
+      where: whereClause,
+      order: order,
       limit: limit,
       offset: offset,
     });
@@ -180,11 +314,22 @@ exports.getEmployees = async (req, res) => {
 };
 
 /* ==============================
-   CREATE EMPLOYEE
+   CREATE EMPLOYEE (With Image)
 ============================== */
 exports.createEmployee = async (req, res) => {
   try {
-    const employee = await Employee.create(req.body);
+    const { name, email, role, salary } = req.body;
+    
+    // Get file path if uploaded, otherwise null
+    const profileImage = req.file ? req.file.path : null;
+
+    const employee = await Employee.create({
+      name,
+      email,
+      role,
+      salary,
+      profileImage // Save path to DB
+    });
     res.status(201).json(employee);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -192,14 +337,52 @@ exports.createEmployee = async (req, res) => {
 };
 
 /* ==============================
-   UPDATE EMPLOYEE
+   UPDATE EMPLOYEE (With Salary History Logic)
 ============================== */
 exports.updateEmployee = async (req, res) => {
   try {
     const { id } = req.params;
-    await Employee.update(req.body, { where: { id } });
+    const { name, email, role, salary } = req.body;
+    
+    // 1. Fetch current data to check for changes
+    const currentEmployee = await Employee.findByPk(id);
+    if (!currentEmployee) return res.status(404).json({ message: "Employee not found" });
+
+    // 2. Check if salary has changed
+    const newSalary = parseFloat(salary);
+    if (newSalary !== currentEmployee.salary) {
+      // Create History Record
+      await SalaryHistory.create({
+        EmployeeId: id,
+        previousSalary: currentEmployee.salary,
+        newSalary: newSalary
+      });
+    }
+
+    // 3. Perform standard update
+    let updateData = { name, email, role, salary: newSalary };
+    if (req.file) {
+      updateData.profileImage = req.file.path;
+    }
+
+    await Employee.update(updateData, { where: { id } });
     const updatedEmployee = await Employee.findByPk(id);
     res.json(updatedEmployee);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+/* ==============================
+   GET SALARY HISTORY
+============================== */
+exports.getSalaryHistory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const history = await SalaryHistory.findAll({
+      where: { EmployeeId: id },
+      order: [['incrementDate', 'DESC']]
+    });
+    res.json(history);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -243,6 +426,48 @@ exports.getEmployeeStats = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+/* ==============================
+   SEND PAY SLIP
+============================== */
+exports.sendPaySlip = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const employee = await Employee.findByPk(id);
+    if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+    const breakup = calculateBreakup(employee.salary);
+
+    // Construct a professional HTML email body
+    const htmlBody = `
+      <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd;">
+        <h2 style="color: #4f46e5;">Salary Slip - ${new Date().toLocaleString('default', { month: 'long', year: 'numeric' })}</h2>
+        <p>Dear ${employee.name},</p>
+        <p>Please find your salary details for this month below.</p>
+        <h3>Monthly Earnings</h3>
+        <table style="width: 100%; border-collapse: collapse;">
+          <tr style="background: #f1f5f9;"><td style="padding: 8px; border: 1px solid #ddd;">Basic Salary</td><td style="padding: 8px; border: 1px solid #ddd;">₹${breakup.basic.toLocaleString()}</td></tr>
+          <tr><td style="padding: 8px; border: 1px solid #ddd;">HRA</td><td style="padding: 8px; border: 1px solid #ddd;">₹${breakup.hra.toLocaleString()}</td></tr>
+          <tr style="background: #f1f5f9;"><td style="padding: 8px; border: 1px solid #ddd;">DA</td><td style="padding: 8px; border: 1px solid #ddd;">₹${breakup.da.toLocaleString()}</td></tr>
+          <tr><td style="padding: 8px; border: 1px solid #ddd;">Travel Allowance</td><td style="padding: 8px; border: 1px solid #ddd;">₹${breakup.travel.toLocaleString()}</td></tr>
+           <tr style="background: #f1f5f9;"><td style="padding: 8px; border: 1px solid #ddd;">Special Allowance</td><td style="padding: 8px; border: 1px solid #ddd;">₹${breakup.special.toLocaleString()}</td></tr>
+          <tr style="font-weight: bold; background: #e0e7ff;"><td style="padding: 8px; border: 1px solid #ddd;">Total Gross</td><td style="padding: 8px; border: 1px solid #ddd;">₹${employee.salary.toLocaleString()}</td></tr>
+        </table>
+        <p style="margin-top: 20px;">This is an auto-generated email. Please do not reply.</p>
+      </div>
+    `;
+    
+    const result = await sendPaySlipEmail(employee, htmlBody);
+    if (result.success) {
+      res.json({ message: "Pay slip sent successfully!" });
+    } else {
+      res.status(500).json({ message: "Failed to send email." });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ... Add this new function to your existing controller file
 </file>
 
 <file path="src/middlewares/admin.middleware.js">
@@ -296,6 +521,11 @@ module.exports = (sequelize, DataTypes) => {
     salary: {
       type: DataTypes.FLOAT,
       allowNull: false
+    },
+    // --- NEW FIELD ---
+    profileImage: {
+      type: DataTypes.STRING,
+      allowNull: true // Image is optional
     }
   });
 };
@@ -306,12 +536,17 @@ const Sequelize = require('sequelize');
 const sequelize = require('../config/db');
 
 const db = {};
-
 db.Sequelize = Sequelize;
 db.sequelize = sequelize;
 
 db.User = require('./user.model')(sequelize, Sequelize);
 db.Employee = require('./employee.model')(sequelize, Sequelize);
+// --- 1. Import New Model ---
+db.SalaryHistory = require('./salaryHistory.model')(sequelize, Sequelize);
+
+// --- 2. Define Associations ---
+db.Employee.hasMany(db.SalaryHistory, { onDelete: 'CASCADE' });
+db.SalaryHistory.belongsTo(db.Employee);
 
 module.exports = db;
 </file>
@@ -353,14 +588,30 @@ module.exports = router;
 const router = require("express").Router();
 const employeeController = require("../controllers/employee.controller");
 const { verifyToken } = require("../middlewares/auth.middleware");
-const { isAdmin } = require("../middlewares/admin.middleware"); // Import
+const { isAdmin } = require("../middlewares/admin.middleware");
+const upload = require("../middlewares/upload.middleware"); // Import Multer
 
+// Stats Route
 router.get("/stats", verifyToken, employeeController.getEmployeeStats);
-router.get("/", verifyToken, employeeController.getEmployees);
-router.post("/", verifyToken, employeeController.createEmployee);
-router.put("/:id", verifyToken, employeeController.updateEmployee);
 
-// Protect DELETE route with isAdmin
+// Get All Route
+router.get("/", verifyToken, employeeController.getEmployees);
+
+// Get Salary History Route
+router.get("/:id/history", verifyToken, employeeController.getSalaryHistory);
+
+
+// Create Route (With Image Upload)
+router.post("/", verifyToken, upload.single('image'), employeeController.createEmployee);
+
+// Update Route (With Image Upload)
+router.put("/:id", verifyToken, upload.single('image'), employeeController.updateEmployee);
+
+// Send Payslip Route
+router.post("/:id/send-payslip", verifyToken, employeeController.sendPaySlip);
+
+
+// Delete Route (Admin Only)
 router.delete("/:id", verifyToken, isAdmin, employeeController.deleteEmployee);
 
 module.exports = router;
@@ -374,18 +625,41 @@ module.exports = router;
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const path = require('path'); // <--- THIS LINE WAS MISSING
 
 const authRoutes = require('./routes/auth.routes');
 const employeeRoutes = require('./routes/employee.routes');
 
 const app = express();
 
+// --- Middleware ---
 app.use(cors());
 app.use(express.json());
 app.use(morgan('dev'));
 
+// --- Serve Uploaded Images Statically ---
+// This allows the frontend to access images at http://localhost:5000/uploads/filename.jpg
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+// --- Routes ---
 app.use('/api/auth', authRoutes);
 app.use('/api/employees', employeeRoutes);
+
+// --- 404 Handler (Route Not Found) ---
+app.use((req, res, next) => {
+  res.status(404).json({ message: "The requested resource was not found." });
+});
+
+// --- Global Error Handler ---
+app.use((error, req, res, next) => {
+  console.error("🔥 GLOBAL ERROR HANDLER:", error.message);
+  console.error(error.stack);
+  
+  res.status(500).json({ 
+    message: "An unexpected error occurred on the server.",
+    error: process.env.NODE_ENV === 'development' ? error.message : undefined
+  });
+});
 
 module.exports = app;
 </file>
@@ -397,6 +671,9 @@ module.exports = app;
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "build": "echo \"Build complete\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -410,11 +687,16 @@ module.exports = app;
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
+    "multer": "^2.0.2",
+    "nodemailer": "^8.0.1",
     "pg": "^8.18.0",
     "pg-hstore": "^2.3.4",
     "redis": "^5.10.0",
     "sequelize": "^6.37.7",
     "yup": "^1.7.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
   }
 }
 </file>
@@ -426,12 +708,55 @@ const { sequelize } = require('./src/models');
 
 const PORT = process.env.PORT || 5000;
 
-sequelize.sync().then(() => {
-  console.log("Database Connected");
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+let server;
+
+// --- UPDATE HERE: Add { alter: true } ---
+// This tells the DB to add any missing columns (like profileImage)
+sequelize.sync({ alter: true }) 
+  .then(() => {
+    console.log("✅ Database Connected & Synced Successfully.");
+    server = app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  })
+  .catch(err => {
+    console.error("❌ FATAL: Failed to connect to the database.");
+    console.error(err);
+    process.exit(1);
   });
+
+// --- Graceful Shutdown Logic ---
+const shutdown = (signal) => {
+  console.info(`\n${signal} signal received. Shutting down gracefully.`);
+  if (server) {
+    server.close(() => {
+      console.log('✅ HTTP server closed.');
+      sequelize.close().then(() => {
+        console.log('✅ Database connection closed.');
+        process.exit(0);
+      });
+    });
+  } else {
+    process.exit(0);
+  }
+};
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 UNHANDLED REJECTION! Shutting down...');
+  console.error(reason);
+  if (server) shutdown('unhandledRejection');
+  else process.exit(1);
 });
+
+process.on('uncaughtException', (error) => {
+  console.error('💥 UNCAUGHT EXCEPTION! Shutting down...');
+  console.error(error);
+  if (server) shutdown('uncaughtException');
+  else process.exit(1);
+});
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 </file>
 
 </files>
