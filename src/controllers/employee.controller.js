@@ -1,10 +1,13 @@
-const { Employee, SalaryHistory, PayrollRecord } = require("../models");
+const { Employee, SalaryHistory, PayrollRecord, Allowance } = require("../models");
 const { fn, col, Op } = require("sequelize");
 const { sendPaySlipEmail } = require('../services/mail.service');
-const { v4: uuidv4 } = require('uuid'); // --- FIXED: Top-level import only once ---
+const { v4: uuidv4 } = require('uuid');
 
-// Helper: Salary component logic
-const calculateBreakup = (totalSalary) => {
+/**
+ * Helper: Standard Percentage Calculation (Top-Down)
+ * Used when a new employee is added or when total CTC is explicitly changed.
+ */
+const calculateStandardBreakup = (totalSalary) => {
   const basic = Math.round(totalSalary * 0.40);
   const hra = Math.round(totalSalary * 0.20);
   const da = Math.round(totalSalary * 0.10);
@@ -13,9 +16,32 @@ const calculateBreakup = (totalSalary) => {
   return { basic, hra, da, travel, special };
 };
 
-// Helper: Find by UUID logic
+/**
+ * Helper: Recalculate Total Salary (Bottom-Up)
+ * Sums standard fields + custom allowances and updates the main salary column.
+ */
+const recalculateTotalSalary = async (employeeId) => {
+  const emp = await Employee.findByPk(employeeId, { include: [Allowance] });
+  
+  // Sum of custom rows
+  const customSum = emp.Allowances ? emp.Allowances.reduce((acc, curr) => acc + curr.amount, 0) : 0;
+  
+  // Sum of standard components
+  const standardSum = (emp.basic || 0) + (emp.hra || 0) + (emp.da || 0) + (emp.travel || 0) + (emp.special || 0);
+  
+  const newTotal = standardSum + customSum;
+  
+  if (newTotal !== emp.salary) {
+    await emp.update({ salary: newTotal });
+  }
+  return newTotal;
+};
+
 const findEmployeeByUUID = async (uuid) => {
-  return await Employee.findOne({ where: { employeeCode: uuid } });
+  return await Employee.findOne({ 
+    where: { employeeCode: uuid },
+    include: [Allowance]
+  });
 };
 
 /* ==============================
@@ -60,12 +86,19 @@ exports.getEmployees = async (req, res) => {
 };
 
 /* ==============================
-   GET SINGLE EMPLOYEE (By UUID)
+   GET SINGLE EMPLOYEE
 ============================== */
 exports.getEmployeeById = async (req, res) => {
   try {
     const employee = await findEmployeeByUUID(req.params.id);
     if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+    // Self-Healing: Populate breakdown if it's an old record with 0s
+    if (employee.salary > 0 && employee.basic === 0) {
+      const breakdown = calculateStandardBreakup(employee.salary);
+      await employee.update(breakdown);
+    }
+
     res.json(employee);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -78,7 +111,17 @@ exports.getEmployeeById = async (req, res) => {
 exports.createEmployee = async (req, res) => {
   try {
     const profileImage = req.file ? req.file.path : null;
-    const employee = await Employee.create({ ...req.body, profileImage });
+    const { salary, ...otherData } = req.body;
+    
+    // Auto-calculate initial breakdown based on total salary
+    const breakdown = calculateStandardBreakup(salary);
+
+    const employee = await Employee.create({ 
+      ...otherData, 
+      salary, 
+      profileImage,
+      ...breakdown 
+    });
 
     await SalaryHistory.create({
       EmployeeId: employee.id,
@@ -94,38 +137,83 @@ exports.createEmployee = async (req, res) => {
 };
 
 /* ==============================
-   UPDATE EMPLOYEE (By UUID)
+   UPDATE EMPLOYEE / COMPONENTS
 ============================== */
 exports.updateEmployee = async (req, res) => {
   try {
-    const currentEmployee = await findEmployeeByUUID(req.params.id);
-    if (!currentEmployee) return res.status(404).json({ message: "Not found" });
+    const employee = await Employee.findOne({ where: { employeeCode: req.params.id } });
+    if (!employee) return res.status(404).json({ message: "Employee not found" });
 
-    const newSalary = parseFloat(req.body.salary);
-    if (newSalary !== currentEmployee.salary) {
-      await SalaryHistory.create({
-        EmployeeId: currentEmployee.id,
-        previousSalary: currentEmployee.salary,
-        newSalary: newSalary
-      });
+    const profileImage = req.file ? req.file.path : undefined;
+    const { name, email, role, salary, basic, hra, da, travel, special } = req.body;
+
+    let updateData = {};
+    if (name) updateData.name = name;
+    if (email) updateData.email = email;
+    if (role) updateData.role = role;
+    if (profileImage) updateData.profileImage = profileImage;
+
+    // IF UPDATING SPECIFIC COMPONENTS (from Salary Details)
+    if (basic !== undefined || hra !== undefined || da !== undefined || travel !== undefined || special !== undefined) {
+      if (basic !== undefined) updateData.basic = parseFloat(basic);
+      if (hra !== undefined) updateData.hra = parseFloat(hra);
+      if (da !== undefined) updateData.da = parseFloat(da);
+      if (travel !== undefined) updateData.travel = parseFloat(travel);
+      if (special !== undefined) updateData.special = parseFloat(special);
+      
+      await employee.update(updateData);
+      // Trigger recalculation to update 'salary' column (Total CTC)
+      await recalculateTotalSalary(employee.id);
+    } 
+    // IF UPDATING TOTAL SALARY (from Edit Employee Form)
+    else if (salary !== undefined && Number(salary) !== employee.salary) {
+      const breakdown = calculateStandardBreakup(salary);
+      updateData = { ...updateData, salary, ...breakdown };
+      await employee.update(updateData);
+    } else {
+      await employee.update(updateData);
     }
 
-    let updateData = { ...req.body, salary: newSalary };
-    if (req.file) updateData.profileImage = req.file.path;
+    // Refresh and send back
+    const updated = await findEmployeeByUUID(req.params.id);
+    res.json(updated);
 
-    await Employee.update(updateData, { where: { id: currentEmployee.id } });
-    res.json(await Employee.findByPk(currentEmployee.id));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 };
 
 /* ==============================
-   DELETE EMPLOYEE (By UUID)
+   ADD CUSTOM ALLOWANCE
+============================== */
+exports.addAllowance = async (req, res) => {
+  try {
+    const employee = await Employee.findOne({ where: { employeeCode: req.params.id } });
+    if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+    const { label, amount } = req.body;
+    await Allowance.create({ 
+      label, 
+      amount: parseFloat(amount), 
+      EmployeeId: employee.id 
+    });
+
+    // Auto-update Total CTC
+    await recalculateTotalSalary(employee.id);
+
+    const updated = await findEmployeeByUUID(req.params.id);
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/* ==============================
+   DELETE EMPLOYEE
 ============================== */
 exports.deleteEmployee = async (req, res) => {
   try {
-    const employee = await findEmployeeByUUID(req.params.id);
+    const employee = await Employee.findOne({ where: { employeeCode: req.params.id } });
     if (!employee) return res.status(404).json({ message: "Not found" });
     await employee.destroy();
     res.json({ message: "Deleted successfully" });
@@ -135,11 +223,11 @@ exports.deleteEmployee = async (req, res) => {
 };
 
 /* ==============================
-   GET HISTORY (By UUID)
+   GET SALARY HISTORY
 ============================== */
 exports.getSalaryHistory = async (req, res) => {
   try {
-    const employee = await findEmployeeByUUID(req.params.id);
+    const employee = await Employee.findOne({ where: { employeeCode: req.params.id } });
     if (!employee) return res.status(404).json({ message: "Employee not found" });
 
     const history = await SalaryHistory.findAll({
@@ -153,11 +241,11 @@ exports.getSalaryHistory = async (req, res) => {
 };
 
 /* ==============================
-   GET PAYROLL (By UUID)
+   GET PAYROLL HISTORY
 ============================== */
 exports.getPayrollHistory = async (req, res) => {
   try {
-    const employee = await findEmployeeByUUID(req.params.id);
+    const employee = await Employee.findOne({ where: { employeeCode: req.params.id } });
     if (!employee) return res.status(404).json({ message: "Employee not found" });
 
     const history = await PayrollRecord.findAll({
@@ -171,11 +259,11 @@ exports.getPayrollHistory = async (req, res) => {
 };
 
 /* ==============================
-   CREDIT SALARY (By UUID)
+   CREDIT SALARY
 ============================== */
 exports.creditSalary = async (req, res) => {
   try {
-    const employee = await findEmployeeByUUID(req.params.id);
+    const employee = await Employee.findOne({ where: { employeeCode: req.params.id } });
     if (!employee) return res.status(404).json({ message: "Employee not found" });
 
     const today = new Date();
@@ -211,11 +299,15 @@ exports.sendPaySlip = async (req, res) => {
     const employee = await findEmployeeByUUID(req.params.id);
     if (!employee) return res.status(404).json({ message: "Not found" });
 
-    const breakup = calculateBreakup(employee.salary);
     const htmlBody = `<div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee;">
         <h2 style="color: #4f46e5;">Salary Slip</h2>
         <p>Hello ${employee.name},</p>
         <p>Total Gross: <strong>₹${employee.salary.toLocaleString()}</strong></p>
+        <p>Basic: ₹${employee.basic.toLocaleString()}</p>
+        <p>HRA: ₹${employee.hra.toLocaleString()}</p>
+        <p>DA: ₹${employee.da.toLocaleString()}</p>
+        <p>Travel: ₹${employee.travel.toLocaleString()}</p>
+        <p>Special: ₹${employee.special.toLocaleString()}</p>
       </div>`;
     
     const result = await sendPaySlipEmail(employee, htmlBody);
@@ -250,7 +342,7 @@ exports.getEmployeeStats = async (req, res) => {
 };
 
 /* ==============================
-   ONE-TIME FIX: SEED UUIDs
+   SEED UUIDs
 ============================== */
 exports.seedUUIDs = async (req, res) => {
   try {

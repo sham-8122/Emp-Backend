@@ -1,10 +1,9 @@
 module.exports = (sequelize, DataTypes) => {
   return sequelize.define('Employee', {
-    // --- NEW: Add UUID Column ---
     employeeCode: {
       type: DataTypes.UUID,
-      defaultValue: DataTypes.UUIDV4, // Automatically generates a UUID
-      allowNull: true, // Allow true initially so existing rows don't crash
+      defaultValue: DataTypes.UUIDV4,
+      allowNull: true,
       unique: true
     },
     name: {
@@ -19,9 +18,30 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING,
       allowNull: false
     },
-    salary: {
+    salary: { // This is Total CTC
       type: DataTypes.FLOAT,
       allowNull: false
+    },
+    // --- NEW COLUMNS FOR CUSTOM BREAKDOWN ---
+    basic: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0
+    },
+    hra: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0
+    },
+    da: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0
+    },
+    travel: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0
+    },
+    special: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0
     },
     profileImage: {
       type: DataTypes.STRING,

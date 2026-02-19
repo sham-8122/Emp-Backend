@@ -19,7 +19,7 @@ router.post("/", verifyToken, upload.single('image'), employeeController.createE
 router.put("/:id", verifyToken, upload.single('image'), employeeController.updateEmployee);
 router.post("/:id/send-payslip", verifyToken, employeeController.sendPaySlip);
 router.post("/:id/credit-salary", verifyToken, employeeController.creditSalary);
-
+router.post("/:id/allowance", verifyToken, employeeController.addAllowance);
 // 4. Admin Only
 router.delete("/:id", verifyToken, isAdmin, employeeController.deleteEmployee);
 
