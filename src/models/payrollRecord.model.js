@@ -1,14 +1,22 @@
 module.exports = (sequelize, DataTypes) => {
   return sequelize.define('PayrollRecord', {
     month: {
-      type: DataTypes.STRING, // e.g., "February"
+      type: DataTypes.STRING,
       allowNull: false
     },
     year: {
-      type: DataTypes.INTEGER, // e.g., 2026
+      type: DataTypes.INTEGER,
       allowNull: false
     },
-    amount: {
+    grossAmount: { // Original Salary
+      type: DataTypes.FLOAT,
+      allowNull: false
+    },
+    deductionAmount: { // Total subtracted
+      type: DataTypes.FLOAT,
+      defaultValue: 0
+    },
+    netAmount: { // Final paid: gross - deduction
       type: DataTypes.FLOAT,
       allowNull: false
     },

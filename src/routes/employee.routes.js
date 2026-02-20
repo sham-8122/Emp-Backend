@@ -12,6 +12,7 @@ router.post("/seed-uuids", verifyToken, employeeController.seedUUIDs); // --- FI
 // 2. Dynamic Routes (Lookups by UUID)
 router.get("/:id", verifyToken, employeeController.getEmployeeById); 
 router.get("/:id/history", verifyToken, employeeController.getSalaryHistory);
+router.get("/:id/projection", verifyToken, employeeController.getSalaryProjection);
 router.get("/:id/payroll", verifyToken, employeeController.getPayrollHistory);
 
 // 3. Action Routes
@@ -20,6 +21,9 @@ router.put("/:id", verifyToken, upload.single('image'), employeeController.updat
 router.post("/:id/send-payslip", verifyToken, employeeController.sendPaySlip);
 router.post("/:id/credit-salary", verifyToken, employeeController.creditSalary);
 router.post("/:id/allowance", verifyToken, employeeController.addAllowance);
+router.get("/:id/deductions", verifyToken, employeeController.getDeductions);
+router.post("/:id/deductions", verifyToken, employeeController.addDeduction);
+router.delete("/deductions/:deductionId", verifyToken, employeeController.deleteDeduction);
 // 4. Admin Only
 router.delete("/:id", verifyToken, isAdmin, employeeController.deleteEmployee);
 

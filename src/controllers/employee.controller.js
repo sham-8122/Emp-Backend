@@ -1,4 +1,4 @@
-const { Employee, SalaryHistory, PayrollRecord, Allowance } = require("../models");
+const { Employee, SalaryHistory, PayrollRecord, Allowance, Deduction } = require("../models");
 const { fn, col, Op } = require("sequelize");
 const { sendPaySlipEmail } = require('../services/mail.service');
 const { v4: uuidv4 } = require('uuid');
@@ -54,7 +54,6 @@ exports.getEmployees = async (req, res) => {
     const search = req.query.search || "";
     const sort = req.query.sort || "createdAt_DESC";
     const role = req.query.role || "";
-
     const offset = (page - 1) * limit;
     const [sortField, sortOrder] = sort.split('_');
     
@@ -69,6 +68,11 @@ exports.getEmployees = async (req, res) => {
 
     const { count, rows } = await Employee.findAndCountAll({
       where: whereClause,
+      include: [{
+        model: Deduction,
+        where: { status: 'pending' },
+        required: false
+      }],
       order: [[sortField, sortOrder]],
       limit: limit,
       offset: offset,
@@ -84,7 +88,6 @@ exports.getEmployees = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
-
 /* ==============================
    GET SINGLE EMPLOYEE
 ============================== */
@@ -278,14 +281,39 @@ exports.creditSalary = async (req, res) => {
       return res.status(400).json({ message: `Salary for ${currentMonth} already credited!` });
     }
 
+    // 1. Find all pending deductions for this month/year
+    const pendingDeductions = await Deduction.findAll({
+      where: { 
+        EmployeeId: employee.id, 
+        status: 'pending',
+        month: currentMonth,
+        year: currentYear
+      }
+    });
+
+    const totalDeductions = pendingDeductions.reduce((sum, d) => sum + d.amount, 0);
+    const netSalary = employee.salary - totalDeductions;
+
+    // 2. Create Payroll Record
     await PayrollRecord.create({
       EmployeeId: employee.id,
       month: currentMonth,
       year: currentYear,
-      amount: employee.salary
+      grossAmount: employee.salary,
+      deductionAmount: totalDeductions,
+      netAmount: netSalary
     });
 
-    res.json({ message: `Salary credited successfully.` });
+    // 3. Mark deductions as applied
+    for (let d of pendingDeductions) {
+      d.status = 'applied';
+      await d.save();
+    }
+
+    res.json({ 
+      message: `Salary for ${currentMonth} credited. Net Paid: ₹${netSalary.toLocaleString()}`,
+      deductionsApplied: totalDeductions
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -354,6 +382,92 @@ exports.seedUUIDs = async (req, res) => {
       count++;
     }
     res.json({ message: `Successfully generated UUIDs for ${count} employees.` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+exports.addDeduction = async (req, res) => {
+  try {
+    const employee = await Employee.findOne({ where: { employeeCode: req.params.id } });
+    const { reason, amount, month, year } = req.body;
+    const deduction = await Deduction.create({
+      reason,
+      amount: parseFloat(amount),
+      month,
+      year,
+      EmployeeId: employee.id
+    });
+    res.status(201).json(deduction);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.getDeductions = async (req, res) => {
+  try {
+    const employee = await Employee.findOne({ where: { employeeCode: req.params.id } });
+    const deductions = await Deduction.findAll({
+      where: { EmployeeId: employee.id },
+      order: [['createdAt', 'DESC']]
+    });
+    res.json(deductions);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.deleteDeduction = async (req, res) => {
+  try {
+    const deduction = await Deduction.findByPk(req.params.deductionId);
+    if (!deduction || deduction.status === 'applied') {
+      return res.status(400).json({ message: "Cannot delete applied deductions" });
+    }
+    await deduction.destroy();
+    res.json({ message: "Deduction removed" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+// ... existing imports
+
+exports.getSalaryProjection = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { month, year } = req.query;
+
+    const employee = await Employee.findOne({ 
+      where: { employeeCode: id },
+      include: [Allowance]
+    });
+
+    if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+    const earnings = [
+      { label: "Basic Salary", amount: employee.basic || 0 },
+      { label: "HRA", amount: employee.hra || 0 },
+      { label: "DA", amount: employee.da || 0 },
+      { label: "Travel Allowance", amount: employee.travel || 0 },
+      { label: "Special Allowance", amount: employee.special || 0 },
+      ...(employee.Allowances || []).map(a => ({ label: a.label, amount: a.amount }))
+    ];
+
+    const targetDeductions = await Deduction.findAll({
+      where: { EmployeeId: employee.id, month, year, status: 'pending' }
+    });
+
+    const totalEarnings = earnings.reduce((sum, item) => sum + item.amount, 0);
+    const totalDeductions = targetDeductions.reduce((sum, d) => sum + d.amount, 0);
+
+    res.json({
+      earnings: earnings || [], // Always return an array
+      deductions: targetDeductions || [], // Always return an array
+      summary: {
+        totalEarnings,
+        totalDeductions,
+        netPay: totalEarnings - totalDeductions,
+        payoutPercentage: totalEarnings > 0 ? (((totalEarnings - totalDeductions) / totalEarnings) * 100).toFixed(1) : 0
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
